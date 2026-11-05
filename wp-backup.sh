@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="2.3.1"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -766,11 +766,17 @@ finish_tar() {
     rm -f "$err"
     return 0
   fi
-  if [[ "$rc" -eq 1 ]] && [[ -s "$out" ]] && tar_live_warning_only "$err"; then
-    log "WARN: $label: files changed while tar was reading; archive kept"
-    sed 's/^/  /' "$err" | while IFS= read -r line; do log "$line"; done
-    rm -f "$err"
-    return 0
+  # Exit 1 is tar's warning status. On a live site the message may be missing
+  # (for example with --warning=no-file-changed) while the archive is still complete.
+  if [[ "$rc" -eq 1 && -s "$out" ]] && gzip -t "$out" 2>/dev/null; then
+    if [[ ! -s "$err" ]] || tar_live_warning_only "$err"; then
+      log "WARN: $label: tar exit 1 while reading a live tree; archive kept"
+      if [[ -s "$err" ]]; then
+        sed 's/^/  /' "$err" | while IFS= read -r line; do log "  $line"; done
+      fi
+      rm -f "$err"
+      return 0
+    fi
   fi
   [[ -s "$err" ]] && log "tar stderr:" && sed 's/^/  /' "$err" | while IFS= read -r line; do log "$line"; done
   rm -f "$out"
@@ -865,7 +871,7 @@ backup_site() {
   log_debug "site exclude file: $exclude_file"
   LAST_CMD="tar -C $WP_ROOT --exclude-from=<tmp> -czf site.tar.gz ."
   set +e
-  tar -C "$WP_ROOT" --warning=no-file-changed --numeric-owner --exclude-from="$exclude_file" -czf "$out" . 2>"$RUN_PATH/site-tar.err"
+  tar -C "$WP_ROOT" --numeric-owner --exclude-from="$exclude_file" -czf "$out" . 2>"$RUN_PATH/site-tar.err"
   rc=$?
   set -e
   rm -f "$exclude_file"
@@ -921,7 +927,7 @@ archive_month_trees() {
   local rc=0
   set +e
   (cd "$uploads" && find "${dirs[@]}" -type f -printf '%p\0') \
-    | "${runner[@]}" tar -C "$uploads" --warning=no-file-changed --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
+    | "${runner[@]}" tar -C "$uploads" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
       2>"$RUN_PATH/uploads-${label}-tar.err"
   rc=${PIPESTATUS[1]}
   set -e
@@ -987,7 +993,7 @@ backup_uploads_changed() {
 
   set +e
   (cd "$WP_ROOT" && find . \( "${prune[@]}" \) -prune -o -type f -mmin "-${mins}" -printf '%P\0') \
-    | tar -C "$WP_ROOT" --warning=no-file-changed --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
+    | tar -C "$WP_ROOT" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
       2>"$RUN_PATH/uploads-changed-tar.err"
   rc=${PIPESTATUS[1]}
   set -e
