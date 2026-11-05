@@ -1,0 +1,6 @@
+.testdata/
+TZ_backup_WP.md
+docs/
+*.secret
+upload.env
+/etc-wp-backup/
