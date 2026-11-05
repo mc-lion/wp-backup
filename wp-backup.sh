@@ -741,6 +741,42 @@ make_empty_tar() {
   tar --numeric-owner -czf "$out" --files-from /dev/null
 }
 
+# GNU tar exits 1 when a live tree changes during read. That is a warning, not a broken archive.
+tar_live_warning_only() {
+  local err="$1"
+  [[ -s "$err" ]] || return 1
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      *"file changed as we read it"*|*"file removed before we read it"*) ;;
+      *) return 1 ;;
+    esac
+  done <"$err"
+  return 0
+}
+
+finish_tar() {
+  local rc="$1"
+  local out="$2"
+  local err="$3"
+  local fail_code="$4"
+  local label="$5"
+  if [[ "$rc" -eq 0 ]]; then
+    rm -f "$err"
+    return 0
+  fi
+  if [[ "$rc" -eq 1 ]] && [[ -s "$out" ]] && tar_live_warning_only "$err"; then
+    log "WARN: $label: files changed while tar was reading; archive kept"
+    sed 's/^/  /' "$err" | while IFS= read -r line; do log "$line"; done
+    rm -f "$err"
+    return 0
+  fi
+  [[ -s "$err" ]] && log "tar stderr:" && sed 's/^/  /' "$err" | while IFS= read -r line; do log "$line"; done
+  rm -f "$out"
+  die "$fail_code" "$label tar failed (exit $rc)"
+}
+
 home_rel_prefix() {
   if [[ "$WP_HOME" == "$WP_ROOT" ]]; then
     printf ''
@@ -829,16 +865,11 @@ backup_site() {
   log_debug "site exclude file: $exclude_file"
   LAST_CMD="tar -C $WP_ROOT --exclude-from=<tmp> -czf site.tar.gz ."
   set +e
-  tar -C "$WP_ROOT" --numeric-owner --exclude-from="$exclude_file" -czf "$out" . 2>"$RUN_PATH/site-tar.err"
+  tar -C "$WP_ROOT" --warning=no-file-changed --numeric-owner --exclude-from="$exclude_file" -czf "$out" . 2>"$RUN_PATH/site-tar.err"
   rc=$?
   set -e
   rm -f "$exclude_file"
-  if [[ "$rc" -ne 0 ]]; then
-    rm -f "$out"
-    [[ -s "$RUN_PATH/site-tar.err" ]] && log "tar stderr:" && sed 's/^/  /' "$RUN_PATH/site-tar.err" | while IFS= read -r line; do log "$line"; done
-    die "$E_SITE" "site tar failed (exit $rc)"
-  fi
-  rm -f "$RUN_PATH/site-tar.err"
+  finish_tar "$rc" "$out" "$RUN_PATH/site-tar.err" "$E_SITE" "site"
   ARTIFACTS+=("site.tar.gz")
   log "Created site.tar.gz ($(du -h "$out" | awk '{print $1}'))"
 }
@@ -890,16 +921,11 @@ archive_month_trees() {
   local rc=0
   set +e
   (cd "$uploads" && find "${dirs[@]}" -type f -printf '%p\0') \
-    | "${runner[@]}" tar -C "$uploads" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
+    | "${runner[@]}" tar -C "$uploads" --warning=no-file-changed --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
       2>"$RUN_PATH/uploads-${label}-tar.err"
   rc=${PIPESTATUS[1]}
   set -e
-  if [[ "$rc" -ne 0 ]]; then
-    rm -f "$out"
-    [[ -s "$RUN_PATH/uploads-${label}-tar.err" ]] && log "tar stderr:" && sed 's/^/  /' "$RUN_PATH/uploads-${label}-tar.err" | while IFS= read -r line; do log "$line"; done
-    die "$E_UPLOADS" "uploads-$label tar failed (exit $rc)"
-  fi
-  rm -f "$RUN_PATH/uploads-${label}-tar.err"
+  finish_tar "$rc" "$out" "$RUN_PATH/uploads-${label}-tar.err" "$E_UPLOADS" "uploads-$label"
   ARTIFACTS+=("$out_name")
   log "Created $out_name ($(du -h "$out" | awk '{print $1}'))"
 }
@@ -961,16 +987,11 @@ backup_uploads_changed() {
 
   set +e
   (cd "$WP_ROOT" && find . \( "${prune[@]}" \) -prune -o -type f -mmin "-${mins}" -printf '%P\0') \
-    | tar -C "$WP_ROOT" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
+    | tar -C "$WP_ROOT" --warning=no-file-changed --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
       2>"$RUN_PATH/uploads-changed-tar.err"
   rc=${PIPESTATUS[1]}
   set -e
-  if [[ "$rc" -ne 0 ]]; then
-    rm -f "$out"
-    [[ -s "$RUN_PATH/uploads-changed-tar.err" ]] && log "tar stderr:" && sed 's/^/  /' "$RUN_PATH/uploads-changed-tar.err" | while IFS= read -r line; do log "$line"; done
-    die "$E_UPLOADS" "uploads-changed tar failed (exit $rc)"
-  fi
-  rm -f "$RUN_PATH/uploads-changed-tar.err"
+  finish_tar "$rc" "$out" "$RUN_PATH/uploads-changed-tar.err" "$E_UPLOADS" "uploads-changed"
   ARTIFACTS+=("$out_name")
   log "Created $out_name ($(du -h "$out" | awk '{print $1}'))"
 }
