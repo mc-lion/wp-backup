@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.3"
+SCRIPT_VERSION="2.3.4"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -91,7 +91,7 @@ Options:
   --backup-root DIR       Local staging root (default: $BACKUP_ROOT)
   --site-id NAME          Site id under backup-root (default: basename of wp-root)
   --mode MODE             full|full-hot|db|site|uploads-hot|uploads-cold|uploads-changed|uploads-all
-  --hot-months N          Last N calendar months of uploads/YYYY/MM (default: 2)
+  --hot-months N          Last N calendar months of uploads/YYYY/MM and uploads/sites/<id>/YYYY/MM (default: 2)
   --month-names FILE      Extra month folder names: "NAME NUMBER" (1-12)
   --changed-hours N       Changed-files window in hours, whole --wp-root (default: 24)
   --destination DEST      local|pbs|s3|both (default: local)
@@ -693,17 +693,17 @@ compute_hot_window() {
   fi
 }
 
-classify_upload_months() {
-  HOT_REL_DIRS=()
-  COLD_REL_DIRS=()
-  local uploads="$WP_HOME/wp-content/uploads"
-  if [[ ! -d "$uploads" ]]; then
-    NOTES="uploads directory missing; hot/cold artifacts skipped"
-    log "$NOTES"
-    return 0
-  fi
-  local uploads_real year_path year month_path month num key rel year_real month_real
-  uploads_real="$(abs_path "$uploads")"
+# Year/month directories directly under $1. $2 is the path relative to uploads
+# (empty, or sites/<id>). $3 is the real path of uploads, used to reject symlinks
+# that leave that tree.
+classify_year_months() {
+  local root="$1"
+  local rel_prefix="$2"
+  local uploads_real="$3"
+  [[ -d "$root" ]] || return 0
+  local year_path year month_path month num key rel year_real month_real prefix
+  prefix="$rel_prefix"
+  [[ -n "$prefix" ]] && prefix="${prefix%/}/"
   while IFS= read -r -d '' year_path; do
     year="$(basename "$year_path")"
     [[ "$year" =~ ^[0-9]{4}$ ]] || continue
@@ -722,14 +722,40 @@ classify_upload_months() {
       esac
       num="${MONTH_NUM[$month]}"
       printf -v key '%04d-%02d' "$((10#$year))" "$num"
-      rel="$year/$month"
+      rel="${prefix}${year}/${month}"
       if [[ -n "${HOT_YEAR_MONTH[$key]:-}" ]]; then
         HOT_REL_DIRS+=("$rel")
       else
         COLD_REL_DIRS+=("$rel")
       fi
     done < <(find "$year_path" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
-  done < <(find "$uploads" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+}
+
+classify_upload_months() {
+  HOT_REL_DIRS=()
+  COLD_REL_DIRS=()
+  local uploads="$WP_HOME/wp-content/uploads"
+  if [[ ! -d "$uploads" ]]; then
+    NOTES="uploads directory missing; hot/cold artifacts skipped"
+    log "$NOTES"
+    return 0
+  fi
+  local uploads_real id_path id id_real
+  uploads_real="$(abs_path "$uploads")"
+  classify_year_months "$uploads" "" "$uploads_real"
+  if [[ -d "$uploads/sites" ]]; then
+    while IFS= read -r -d '' id_path; do
+      id="$(basename "$id_path")"
+      [[ "$id" =~ ^[0-9]+$ ]] || continue
+      id_real="$(abs_path "$id_path")"
+      case "$id_real" in
+        "$uploads_real"/*) ;;
+        *) log "Skipping sites id outside uploads: $id_real"; continue ;;
+      esac
+      classify_year_months "$id_path" "sites/$id" "$uploads_real"
+    done < <(find "$uploads/sites" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
+  fi
   log "uploads-hot months: ${HOT_REL_DIRS[*]:-(none)}"
   log "uploads-cold months: ${COLD_REL_DIRS[*]:-(none)}"
 }
