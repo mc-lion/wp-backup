@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.1"
+SCRIPT_VERSION="2.3.2"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -90,7 +90,7 @@ Options:
   --wp-config FILE        Explicit wp-config.php path
   --backup-root DIR       Local staging root (default: $BACKUP_ROOT)
   --site-id NAME          Site id under backup-root (default: basename of wp-root)
-  --mode MODE             full|db|site|uploads-hot|uploads-cold|uploads-changed|uploads-all
+  --mode MODE             full|full-hot|db|site|uploads-hot|uploads-cold|uploads-changed|uploads-all
   --hot-months N          Last N calendar months of uploads/YYYY/MM (default: 2)
   --month-names FILE      Extra month folder names: "NAME NUMBER" (1-12)
   --changed-hours N       Changed-files window in hours, whole --wp-root (default: 24)
@@ -374,7 +374,7 @@ parse_args() {
   WP_ROOT="$(abs_path "$WP_ROOT")"
 
   case "$MODE" in
-    full|db|site|uploads-hot|uploads-cold|uploads-changed|uploads-all) ;;
+    full|full-hot|db|site|uploads-hot|uploads-cold|uploads-changed|uploads-all) ;;
     *) die "$E_ARGS" "Invalid --mode: $MODE" ;;
   esac
 
@@ -1062,7 +1062,7 @@ EOF
 
 update_latest_symlink() {
   [[ "$DRY_RUN" -eq 1 ]] && return 0
-  [[ "$MODE" == "full" ]] || return 0
+  [[ "$MODE" == "full" || "$MODE" == "full-hot" ]] || return 0
   local link="$BACKUP_ROOT/$SITE_ID/latest"
   ln -sfn "$RUN_PATH" "$link"
   log "Updated latest -> $RUN_ID"
@@ -1086,7 +1086,7 @@ rotate_runs() {
   if [[ "$MODE" == "uploads-changed" ]]; then
     want_changed=1
     keep="$KEEP_CHANGED_RUNS"
-  elif [[ "$MODE" != "full" ]]; then
+  elif [[ "$MODE" != "full" && "$MODE" != "full-hot" ]]; then
     return 0
   fi
 
@@ -1290,6 +1290,11 @@ run_backup_modes() {
       backup_uploads_hot
       backup_uploads_cold
       ;;
+    full-hot)
+      backup_db
+      backup_site
+      backup_uploads_hot
+      ;;
     db) backup_db ;;
     site) backup_site ;;
     uploads-hot) backup_uploads_hot ;;
@@ -1355,7 +1360,7 @@ main() {
   step "find wp-config"
   find_wp_config
   case "$MODE" in
-    full|db)
+    full|full-hot|db)
       step "parse DB settings"
       load_db_settings
       ;;

@@ -65,6 +65,7 @@ sudo ./wp-backup.sh \
 | Mode | Содержимое |
 |------|------------|
 | `full` | БД + site (без каталогов `uploads/ГОД/МЕСЯЦ` и без cache) + uploads-hot + uploads-cold |
+| `full-hot` | то же, что `full`, без `uploads-cold.tar.gz` |
 | `db` | только БД |
 | `site` | файлы сайта; прочие файлы и папки внутри `uploads` входят, каталоги `ГОД/МЕСЯЦ` нет |
 | `uploads-hot` | каталоги `uploads/ГОД/МЕСЯЦ` за последние `--hot-months` (default 2), включая переход через Новый год |
