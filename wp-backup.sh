@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.4"
+SCRIPT_VERSION="2.3.5"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -505,10 +505,10 @@ extract_define() {
   local file="$2"
   local val=""
   if command -v perl >/dev/null 2>&1; then
-    val="$(perl -ne "if (!/^\\s*\\/\\// && /define\\s*\\(\\s*['\\\"]${key}['\\\"]\\s*,\\s*['\\\"]([^'\\\"]*)['\\\"]\\s*\\)/) { print \$1; exit }" "$file" 2>/dev/null || true)"
+    val="$(perl -ne "if (!/^#/ && !/^\\s*\\/\\// && /define\\s*\\(\\s*['\\\"]${key}['\\\"]\\s*,\\s*['\\\"]([^'\\\"]*)['\\\"]\\s*\\)/) { print \$1; exit }" "$file" 2>/dev/null || true)"
   fi
   if [[ -z "$val" ]]; then
-    val="$(grep -E "define\s*\(\s*['\"]${key}['\"]" "$file" | grep -v '^\s*//' | head -n1 \
+    val="$(grep -E "define\s*\(\s*['\"]${key}['\"]" "$file" | grep -v '^#' | grep -v '^\s*//' | head -n1 \
       | sed -E "s/.*define[[:space:]]*\([[:space:]]*['\"]${key}['\"][[:space:]]*,[[:space:]]*['\"]([^'\"]*)['\"].*/\1/" || true)"
   fi
   # sed leaves whole line if no match — detect that
@@ -532,6 +532,14 @@ parse_wp_config_php() {
   local out
   out="$(php -r '
     $c = file_get_contents($argv[1]);
+    $kept = array();
+    foreach (preg_split("/\r\n|\n|\r/", (string)$c) as $line) {
+      if ($line !== "" && $line[0] === "#") {
+        continue;
+      }
+      $kept[] = $line;
+    }
+    $c = implode("\n", $kept);
     if (!preg_match("/define\s*\(\s*[\"'\'']DB_NAME[\"'\'']\s*,\s*[\"'\''](.*)[\"'\'']\s*\)/", $c, $m)) exit(1);
     echo $m[1], "\n";
     if (!preg_match("/define\s*\(\s*[\"'\'']DB_USER[\"'\'']\s*,\s*[\"'\''](.*)[\"'\'']\s*\)/", $c, $m)) exit(1);
