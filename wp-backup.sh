@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.2"
+SCRIPT_VERSION="2.3.3"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -625,6 +625,20 @@ rel_to_root() {
   printf '%s\n' "${path#"$WP_ROOT"/}"
 }
 
+# Archive members are "<basename of --wp-root>/<path inside that directory>".
+wp_root_base() {
+  basename -- "$WP_ROOT"
+}
+
+wp_root_parent() {
+  dirname -- "$WP_ROOT"
+}
+
+archive_member() {
+  local rel="${1#./}"
+  printf '%s/%s' "$(wp_root_base)" "$rel"
+}
+
 load_month_names() {
   MONTH_NUM=()
   local i n
@@ -845,33 +859,39 @@ backup_site() {
     log "DRY-RUN: tar site -> site.tar.gz (month dirs excluded: ${HOT_REL_DIRS[*]:-} ${COLD_REL_DIRS[*]:-})"
     return 0
   fi
-  local out="$RUN_PATH/site.tar.gz" rc=0 prefix exclude_file d
+  local out="$RUN_PATH/site.tar.gz" rc=0 prefix exclude_file d base parent line
   prefix="$(home_rel_prefix)"
+  base="$(wp_root_base)"
+  parent="$(wp_root_parent)"
   exclude_file="$(mktemp)"
   {
     echo ".git"
     echo "*/.git"
-    echo "${prefix}wp-content/cache"
-    echo "${prefix}wp-content/upgrade"
-    echo "${prefix}wp-content/tmp"
-    echo "${prefix}wp-content/temp"
-    echo "${prefix}wp-content/w3tc-cache"
-    echo "${prefix}wp-content/wflogs"
-    echo "${prefix}wp-content/wp-rocket-config"
-    echo "${prefix}wp-content/cache-*"
+    echo "${base}/${prefix}wp-content/cache"
+    echo "${base}/${prefix}wp-content/upgrade"
+    echo "${base}/${prefix}wp-content/tmp"
+    echo "${base}/${prefix}wp-content/temp"
+    echo "${base}/${prefix}wp-content/w3tc-cache"
+    echo "${base}/${prefix}wp-content/wflogs"
+    echo "${base}/${prefix}wp-content/wp-rocket-config"
+    echo "${base}/${prefix}wp-content/cache-*"
     for d in "${HOT_REL_DIRS[@]+"${HOT_REL_DIRS[@]}"}" "${COLD_REL_DIRS[@]+"${COLD_REL_DIRS[@]}"}"; do
-      [[ -n "$d" ]] && echo "${prefix}wp-content/uploads/${d}"
+      [[ -n "$d" ]] && echo "${base}/${prefix}wp-content/uploads/${d}"
     done
     if [[ -n "$EXCLUDE_FROM" ]]; then
       [[ -f "$EXCLUDE_FROM" ]] || die "$E_ARGS" "exclude-from not found: $EXCLUDE_FROM"
-      cat "$EXCLUDE_FROM"
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        line="${line#./}"
+        echo "${base}/${line}"
+      done <"$EXCLUDE_FROM"
     fi
   } >"$exclude_file"
 
   log_debug "site exclude file: $exclude_file"
-  LAST_CMD="tar -C $WP_ROOT --exclude-from=<tmp> -czf site.tar.gz ."
+  LAST_CMD="tar -C $parent --exclude-from=<tmp> -czf site.tar.gz $base"
   set +e
-  tar -C "$WP_ROOT" --numeric-owner --exclude-from="$exclude_file" -czf "$out" . 2>"$RUN_PATH/site-tar.err"
+  tar -C "$parent" --numeric-owner --exclude-from="$exclude_file" -czf "$out" "$base" 2>"$RUN_PATH/site-tar.err"
   rc=$?
   set -e
   rm -f "$exclude_file"
@@ -922,14 +942,21 @@ archive_month_trees() {
     command -v ionice >/dev/null 2>&1 && runner+=(ionice -c 3)
   fi
 
+  local parent base rel_uploads
+  parent="$(wp_root_parent)"
+  base="$(wp_root_base)"
+  rel_uploads="$(rel_to_root "$uploads")"
   log "Archiving uploads-$label (${#dirs[@]} month dirs) -> $out_name"
-  LAST_CMD="find ${dirs[*]} -type f | tar -C $uploads -czf $out_name"
+  LAST_CMD="find ${dirs[*]} -type f | tar -C $parent -czf $out_name"
   local rc=0
   set +e
   (cd "$uploads" && find "${dirs[@]}" -type f -printf '%p\0') \
-    | "${runner[@]}" tar -C "$uploads" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
+    | while IFS= read -r -d '' rel || [[ -n "$rel" ]]; do
+        printf '%s\0' "$base/$rel_uploads/$rel"
+      done \
+    | "${runner[@]}" tar -C "$parent" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
       2>"$RUN_PATH/uploads-${label}-tar.err"
-  rc=${PIPESTATUS[1]}
+  rc=${PIPESTATUS[2]}
   set -e
   finish_tar "$rc" "$out" "$RUN_PATH/uploads-${label}-tar.err" "$E_UPLOADS" "uploads-$label"
   ARTIFACTS+=("$out_name")
@@ -980,8 +1007,11 @@ backup_uploads_changed() {
       ;;
   esac
 
+  local parent base
+  parent="$(wp_root_parent)"
+  base="$(wp_root_base)"
   log "Scanning $WP_ROOT for files changed within ${CHANGED_HOURS}h"
-  LAST_CMD="find $WP_ROOT -mmin -${mins} | tar -C $WP_ROOT"
+  LAST_CMD="find $WP_ROOT -mmin -${mins} | tar -C $parent"
   local rc=0 has=""
   has="$(cd "$WP_ROOT" && find . \( "${prune[@]}" \) -prune -o -type f -mmin "-${mins}" -print -quit || true)"
   if [[ -z "$has" ]]; then
@@ -993,9 +1023,13 @@ backup_uploads_changed() {
 
   set +e
   (cd "$WP_ROOT" && find . \( "${prune[@]}" \) -prune -o -type f -mmin "-${mins}" -printf '%P\0') \
-    | tar -C "$WP_ROOT" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
+    | while IFS= read -r -d '' rel || [[ -n "$rel" ]]; do
+        [[ -z "$rel" ]] && continue
+        printf '%s\0' "$base/$rel"
+      done \
+    | tar -C "$parent" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
       2>"$RUN_PATH/uploads-changed-tar.err"
-  rc=${PIPESTATUS[1]}
+  rc=${PIPESTATUS[2]}
   set -e
   finish_tar "$rc" "$out" "$RUN_PATH/uploads-changed-tar.err" "$E_UPLOADS" "uploads-changed"
   ARTIFACTS+=("$out_name")
