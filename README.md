@@ -70,7 +70,7 @@ sudo ./wp-backup.sh \
 | `site` | файлы сайта; прочие файлы и папки внутри `uploads` входят, каталоги `ГОД/МЕСЯЦ` нет |
 | `uploads-hot` | каталоги `uploads/ГОД/МЕСЯЦ` за последние `--hot-months` (default 2), включая переход через Новый год |
 | `uploads-cold` | остальные каталоги `ГОД/МЕСЯЦ` |
-| `uploads-changed` | файлы всего `--wp-root` с `mtime` не старше `--changed-hours` (default 24); cache/tmp/`.git` не входят |
+| `uploads-changed` | файлы всего `--wp-root` с `mtime` не старше `--changed-hours` (default 24) или `--changed-days` (`N*24` часа); cache/tmp/`.git` не входят |
 | `uploads-all` | hot + cold |
 
 Год — папка из 4 цифр, месяц — `01`–`12`. Дополнительные имена: `--month-names FILE` со строками `Имя 11`. Те же год и месяц ищутся ещё в `uploads/sites/<id>/`, где `<id>` — каталог из цифр; таких каталогов может быть несколько. Во всех tar первым каталогом идёт имя `--wp-root`, дальше путь внутри него. Для `--wp-root /var/www/edu.kp.ru` файл hot выглядит как `edu.kp.ru/edu/wp-content/uploads/2026/11/photo.jpg` или `edu.kp.ru/edu/wp-content/uploads/sites/2/2026/11/photo.jpg`.

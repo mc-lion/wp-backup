@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.5"
+SCRIPT_VERSION="2.3.6"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -26,6 +26,8 @@ MODE="full"
 HOT_MONTHS=2
 MONTH_NAMES_FILE=""
 CHANGED_HOURS=24
+CHANGED_DAYS=""
+CHANGED_HOURS_SET=0
 DRY_RUN=0
 DEBUG="${DEBUG:-0}"
 KEEP_RUNS=7
@@ -94,6 +96,7 @@ Options:
   --hot-months N          Last N calendar months of uploads/YYYY/MM and uploads/sites/<id>/YYYY/MM (default: 2)
   --month-names FILE      Extra month folder names: "NAME NUMBER" (1-12)
   --changed-hours N       Changed-files window in hours, whole --wp-root (default: 24)
+  --changed-days N        Same window in days (N*24 hours). Do not combine with --changed-hours
   --destination DEST      local|pbs|s3|both (default: local)
   --upload-config FILE    Env file with PBS_/S3_ settings
   --skip-upload           Force destination=local for this run
@@ -189,6 +192,7 @@ dump_debug_context() {
     echo "hot_resolved: ${HOT_REL_DIRS[*]:-}"
     echo "cold_resolved: ${COLD_REL_DIRS[*]:-}"
     echo "changed_hours: ${CHANGED_HOURS:-}"
+    echo "changed_days: ${CHANGED_DAYS:-}"
     echo "dry_run: ${DRY_RUN:-}"
     echo "upload_only: ${UPLOAD_ONLY:-}"
     echo "upload_config: ${UPLOAD_CONFIG:-}"
@@ -319,7 +323,8 @@ parse_args() {
       --hot-months) HOT_MONTHS="${2:-}"; shift 2 ;;
       --hot-days) die "$E_ARGS" "--hot-days was removed; use --hot-months N (calendar months)" ;;
       --month-names) MONTH_NAMES_FILE="${2:-}"; shift 2 ;;
-      --changed-hours) CHANGED_HOURS="${2:-}"; shift 2 ;;
+      --changed-hours) CHANGED_HOURS="${2:-}"; CHANGED_HOURS_SET=1; shift 2 ;;
+      --changed-days) CHANGED_DAYS="${2:-}"; shift 2 ;;
       --destination) DESTINATION="${2:-}"; shift 2 ;;
       --upload-config) UPLOAD_CONFIG="${2:-}"; shift 2 ;;
       --skip-upload) SKIP_UPLOAD=1; shift ;;
@@ -383,6 +388,11 @@ parse_args() {
     die "$E_ARGS" "month-names file not found: $MONTH_NAMES_FILE"
   fi
   [[ "$CHANGED_HOURS" =~ ^[0-9]+$ ]] || die "$E_ARGS" "--changed-hours must be integer"
+  if [[ -n "$CHANGED_DAYS" ]]; then
+    [[ "$CHANGED_DAYS" =~ ^[0-9]+$ ]] || die "$E_ARGS" "--changed-days must be integer"
+    [[ "$CHANGED_HOURS_SET" -eq 0 ]] || die "$E_ARGS" "Pass only one of --changed-days and --changed-hours"
+    CHANGED_HOURS=$((CHANGED_DAYS * 24))
+  fi
   [[ "$KEEP_RUNS" =~ ^[0-9]+$ ]] || die "$E_ARGS" "--keep-runs must be integer"
   [[ "$KEEP_CHANGED_RUNS" =~ ^[0-9]+$ ]] || die "$E_ARGS" "--keep-changed-runs must be integer"
   [[ "$MIN_FREE_GB" =~ ^[0-9]+$ ]] || die "$E_ARGS" "--min-free-gb must be integer"
@@ -1006,6 +1016,14 @@ backup_uploads_cold() {
   archive_month_trees "cold" "uploads-cold.tar.gz" "${COLD_REL_DIRS[@]+"${COLD_REL_DIRS[@]}"}"
 }
 
+changed_window_label() {
+  if [[ -n "$CHANGED_DAYS" ]]; then
+    printf '%sd (%sh)' "$CHANGED_DAYS" "$CHANGED_HOURS"
+  else
+    printf '%sh' "$CHANGED_HOURS"
+  fi
+}
+
 backup_uploads_changed() {
   step "backup changed files under wp-root"
   local mins=$((CHANGED_HOURS * 60))
@@ -1020,7 +1038,7 @@ backup_uploads_changed() {
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "DRY-RUN: changed files under $WP_ROOT newer than ${CHANGED_HOURS}h -> $out_name"
+    log "DRY-RUN: changed files under $WP_ROOT newer than $(changed_window_label) -> $out_name"
     return 0
   fi
 
@@ -1044,7 +1062,7 @@ backup_uploads_changed() {
   local parent base
   parent="$(wp_root_parent)"
   base="$(wp_root_base)"
-  log "Scanning $WP_ROOT for files changed within ${CHANGED_HOURS}h"
+  log "Scanning $WP_ROOT for files changed within $(changed_window_label)"
   LAST_CMD="find $WP_ROOT -mmin -${mins} | tar -C $parent"
   local rc=0 has=""
   has="$(cd "$WP_ROOT" && find . \( "${prune[@]}" \) -prune -o -type f -mmin "-${mins}" -print -quit || true)"
@@ -1106,6 +1124,7 @@ write_manifest() {
   "hot_months": $HOT_MONTHS,
   "hot_months_resolved": $(json_string_array "${HOT_REL_DIRS[@]+"${HOT_REL_DIRS[@]}"}"),
   "changed_hours": $CHANGED_HOURS,
+  "changed_days": ${CHANGED_DAYS:-null},
   "notes": "$(json_escape "$NOTES")",
   "error": "$(json_escape "$ERROR_MSG")",
   "artifacts": $artifacts_json,
