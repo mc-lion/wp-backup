@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.6"
+SCRIPT_VERSION="2.3.7"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -35,7 +35,7 @@ KEEP_CHANGED_RUNS=14
 DESTINATION="local"
 UPLOAD_CONFIG=""
 SKIP_UPLOAD=0
-KEEP_LOCAL="yes"
+KEEP_LOCAL="no"
 MIN_FREE_GB=5
 EXCLUDE_FROM=""
 ALLOW_PHP_PARSE=0
@@ -100,7 +100,7 @@ Options:
   --destination DEST      local|pbs|s3|both (default: local)
   --upload-config FILE    Env file with PBS_/S3_ settings
   --skip-upload           Force destination=local for this run
-  --keep-local yes|no     Keep local run after successful upload (default: yes)
+  --keep-local yes|no     Keep local run after a successful remote upload (default: no). Ignored for destination=local
   --keep-runs N           Retention for full/non-changed runs (default: 7)
   --keep-changed-runs N   Retention for uploads-changed runs (default: 14)
   --min-free-gb N         Abort if free space below N GiB (default: 5)
@@ -1352,18 +1352,23 @@ do_uploads() {
   fi
 
   if [[ "$KEEP_LOCAL" == "no" && "$DRY_RUN" -eq 0 ]]; then
-    log "Removing local run after successful upload (--keep-local no)"
-    # remove contents but keep path reference cleared carefully
+    log "Removing local run after successful upload (use --keep-local yes to keep it)"
     local parent
     parent="$(dirname "$dir")"
     rm -rf "$dir"
-    # fix latest if pointed here
     if [[ -L "$parent/latest" ]]; then
       local cur
       cur="$(readlink -f "$parent/latest" || true)"
       if [[ "$cur" == "$dir" ]]; then
         rm -f "$parent/latest"
       fi
+    fi
+    # The log file lived inside the run directory. Further log lines go to stderr only.
+    if [[ "${LOG_FILE:-}" == "$dir"/* ]]; then
+      LOG_FILE=""
+    fi
+    if [[ "${DEBUG_FILE:-}" == "$dir"/* ]]; then
+      DEBUG_FILE=""
     fi
   fi
   return 0

@@ -79,10 +79,10 @@ sudo ./wp-backup.sh \
 
 | Значение | Поведение |
 |----------|-----------|
-| `local` | только диск сервера |
-| `pbs` | после сборки → PBS |
-| `s3` | после сборки → S3 |
-| `both` | PBS и S3; успех только если оба OK |
+| `local` | только диск сервера, каталог run остаётся |
+| `pbs` | после сборки → PBS, затем локальный run удаляется |
+| `s3` | после сборки → S3, затем локальный run удаляется |
+| `both` | PBS и S3; успех только если оба OK. Локальный run удаляется после успеха обоих |
 
 Пример конфига: [examples/upload.env.example](examples/upload.env.example).
 
@@ -91,9 +91,10 @@ sudo ./wp-backup.sh \
   --wp-root /var/www/example.com \
   --mode full \
   --destination both \
-  --upload-config /etc/wp-backup/upload.env \
-  --keep-local yes
+  --upload-config /etc/wp-backup/upload.env
 ```
+
+После успешной выгрузки каталог run на диске удаляется. Чтобы оставить файлы локально, добавьте `--keep-local yes`. Если выгрузка не удалась, каталог не удаляется. `--destination local` файлы не трогает.
 
 Повторная выгрузка без пересборки:
 
@@ -104,6 +105,8 @@ sudo ./wp-backup.sh \
   --destination s3 \
   --upload-config /etc/wp-backup/upload.env
 ```
+
+После успеха эта команда тоже удаляет `--run-dir`. Добавьте `--keep-local yes`, если каталог нужно оставить.
 
 ### PBS
 
