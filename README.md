@@ -73,7 +73,7 @@ sudo ./wp-backup.sh \
 | `uploads-changed` | файлы всего `--wp-root` с `mtime` не старше `--changed-hours` (default 24) или `--changed-days` (`N*24` часа); cache/tmp/`.git` не входят |
 | `uploads-all` | hot + cold |
 
-Год — папка из 4 цифр, месяц — `01`–`12`. Дополнительные имена: `--month-names FILE` со строками `Имя 11`. Те же год и месяц ищутся ещё в `uploads/sites/<id>/`, где `<id>` — каталог из цифр; таких каталогов может быть несколько. Во всех tar первым каталогом идёт имя `--wp-root`, дальше путь внутри него. Для `--wp-root /var/www/edu.kp.ru` файл hot выглядит как `edu.kp.ru/edu/wp-content/uploads/2026/11/photo.jpg` или `edu.kp.ru/edu/wp-content/uploads/sites/2/2026/11/photo.jpg`.
+Год — папка из 4 цифр, месяц — `01`–`12`. Дополнительные имена: `--month-names FILE` со строками `Имя 11`. Те же год и месяц ищутся ещё в `uploads/sites/<id>/`, где `<id>` — каталог из цифр; таких каталогов может быть несколько. Повторяемый `--exclude PATH` выкидывает путь из `site`, `uploads-hot`, `uploads-cold` и `uploads-changed`. Повторяемый `--cold-path PATH` убирает путь из `site.tar.gz` и кладёт его файлы в `uploads-cold.tar.gz`; месяц из hot-окна внутри этого пути остаётся только в hot. Если тот же путь указан и в `--exclude`, он не попадает никуда. Путь относительно `--wp-root` (`edu/wp-content/upgrade`) или абсолютный внутри него. Каталог берётся целиком. `--exclude-from FILE` по-прежнему добавляет шаблоны только в `site.tar.gz`. Во всех tar первым каталогом идёт имя `--wp-root`, дальше путь внутри него. Для `--wp-root /var/www/edu.kp.ru` файл hot выглядит как `edu.kp.ru/edu/wp-content/uploads/2026/11/photo.jpg` или `edu.kp.ru/edu/wp-content/uploads/sites/2/2026/11/photo.jpg`.
 
 ## Выгрузка `--destination`
 

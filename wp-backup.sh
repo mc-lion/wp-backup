@@ -3,7 +3,7 @@
 # См. TZ_backup_WP.md
 set -euo pipefail
 
-SCRIPT_VERSION="2.3.7"
+SCRIPT_VERSION="2.3.9"
 SCRIPT_NAME="$(basename "$0")"
 
 # Exit codes (TZ §6)
@@ -38,6 +38,10 @@ SKIP_UPLOAD=0
 KEEP_LOCAL="no"
 MIN_FREE_GB=5
 EXCLUDE_FROM=""
+declare -a EXCLUDE_PATHS=()
+declare -a EXCLUDE_RELS=()
+declare -a COLD_PATHS=()
+declare -a COLD_RELS=()
 ALLOW_PHP_PARSE=0
 UPLOAD_ONLY=0
 RUN_DIR=""
@@ -104,7 +108,11 @@ Options:
   --keep-runs N           Retention for full/non-changed runs (default: 7)
   --keep-changed-runs N   Retention for uploads-changed runs (default: 14)
   --min-free-gb N         Abort if free space below N GiB (default: 5)
-  --exclude-from FILE     Extra tar exclude patterns
+  --exclude PATH          Exclude PATH from site, hot, cold and changed archives. Repeatable.
+                        Relative to --wp-root, or absolute inside it
+  --cold-path PATH        Move PATH from site.tar.gz into uploads-cold.tar.gz. Repeatable.
+                        Same path form as --exclude. A path also given to --exclude is omitted
+  --exclude-from FILE     Extra site.tar.gz exclude patterns, one path per line
   --allow-php-parse       Fallback PHP parse of wp-config if text parse fails
   --upload-only           Upload existing --run-dir without rebuilding
   --run-dir DIR           Existing run directory for --upload-only
@@ -335,6 +343,16 @@ parse_args() {
       --keep-runs) KEEP_RUNS="${2:-}"; shift 2 ;;
       --keep-changed-runs) KEEP_CHANGED_RUNS="${2:-}"; shift 2 ;;
       --min-free-gb) MIN_FREE_GB="${2:-}"; shift 2 ;;
+      --exclude)
+        [[ -n "${2:-}" ]] || die "$E_ARGS" "--exclude requires a path"
+        EXCLUDE_PATHS+=("$2")
+        shift 2
+        ;;
+      --cold-path)
+        [[ -n "${2:-}" ]] || die "$E_ARGS" "--cold-path requires a path"
+        COLD_PATHS+=("$2")
+        shift 2
+        ;;
       --exclude-from) EXCLUDE_FROM="${2:-}"; shift 2 ;;
       --allow-php-parse) ALLOW_PHP_PARSE=1; shift ;;
       --upload-only) UPLOAD_ONLY=1; shift ;;
@@ -400,6 +418,8 @@ parse_args() {
   if [[ -z "$SITE_ID" ]]; then
     SITE_ID="$(basename "$WP_ROOT")"
   fi
+  normalize_exclude_paths
+  normalize_cold_paths
 }
 
 load_upload_config() {
@@ -641,6 +661,117 @@ rel_to_root() {
     return
   fi
   printf '%s\n' "${path#"$WP_ROOT"/}"
+}
+
+# Path relative to --wp-root. Absolute paths must stay inside it.
+# "." and ".." cannot leave it or name the root itself.
+normalize_user_path() {
+  local raw="$1"
+  local what="$2"
+  local candidate abs rel
+  if [[ "$raw" == /* ]]; then
+    candidate="$raw"
+  else
+    candidate="$WP_ROOT/${raw#./}"
+  fi
+  abs="$(abs_path "$candidate")"
+  if [[ "$abs" == "$WP_ROOT" ]]; then
+    die "$E_ARGS" "Refusing to use the whole --wp-root as --$what: $raw"
+  fi
+  case "$abs" in
+    "$WP_ROOT"/*) rel="${abs#"$WP_ROOT"/}" ;;
+    *) die "$E_ARGS" "--$what is outside --wp-root: $raw" ;;
+  esac
+  printf '%s' "$rel"
+}
+
+normalize_exclude_paths() {
+  EXCLUDE_RELS=()
+  local raw
+  for raw in "${EXCLUDE_PATHS[@]+"${EXCLUDE_PATHS[@]}"}"; do
+    EXCLUDE_RELS+=("$(normalize_user_path "$raw" "exclude")")
+  done
+}
+
+# A cold path covered by --exclude is dropped: that tree is stored nowhere.
+# A path inside another cold path is dropped so its files are archived once.
+normalize_cold_paths() {
+  COLD_RELS=()
+  local raw rel ex other drop
+  local -a incoming=()
+  for raw in "${COLD_PATHS[@]+"${COLD_PATHS[@]}"}"; do
+    rel="$(normalize_user_path "$raw" "cold-path")"
+    drop=0
+    for ex in "${EXCLUDE_RELS[@]+"${EXCLUDE_RELS[@]}"}"; do
+      if [[ "$rel" == "$ex" || "$rel" == "$ex"/* ]]; then
+        log "cold-path $rel ignored, covered by --exclude $ex"
+        drop=1
+        break
+      fi
+    done
+    [[ "$drop" -eq 0 ]] && incoming+=("$rel")
+  done
+  for rel in "${incoming[@]+"${incoming[@]}"}"; do
+    drop=0
+    for other in "${incoming[@]+"${incoming[@]}"}"; do
+      [[ "$rel" == "$other" ]] && continue
+      if [[ "$rel" == "$other"/* ]]; then
+        log "cold-path $rel covered by cold-path $other"
+        drop=1
+        break
+      fi
+    done
+    if [[ "$drop" -eq 0 ]]; then
+      for other in "${COLD_RELS[@]+"${COLD_RELS[@]}"}"; do
+        [[ "$rel" == "$other" ]] && drop=1
+      done
+    fi
+    [[ "$drop" -eq 0 ]] && COLD_RELS+=("$rel")
+  done
+}
+
+# Literal path for find -path and tar --exclude. * ? [ stay characters, not globs.
+escape_glob() {
+  local s="$1" out="" i c
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      '*'|'?'|'[') out+="[$c]" ;;
+      *) out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+path_is_excluded() {
+  local rel="${1#./}"
+  rel="${rel%/}"
+  [[ -n "$rel" ]] || return 1
+  local ex
+  for ex in "${EXCLUDE_RELS[@]+"${EXCLUDE_RELS[@]}"}"; do
+    [[ "$rel" == "$ex" || "$rel" == "$ex"/* ]] && return 0
+  done
+  return 1
+}
+
+# Recognized uploads/YYYY/MM and uploads/sites/<id>/YYYY/MM, hot or cold.
+path_under_classified_month() {
+  local rel="${1#./}"
+  rel="${rel%/}"
+  [[ -n "$rel" ]] || return 1
+  local uploads_rel month prefix
+  uploads_rel="$(rel_to_root "$WP_HOME/wp-content/uploads")"
+  [[ "$uploads_rel" == "." ]] && uploads_rel=""
+  for month in "${HOT_REL_DIRS[@]+"${HOT_REL_DIRS[@]}"}" "${COLD_REL_DIRS[@]+"${COLD_REL_DIRS[@]}"}"; do
+    [[ -n "$month" ]] || continue
+    if [[ -n "$uploads_rel" ]]; then
+      prefix="$uploads_rel/$month"
+    else
+      prefix="$month"
+    fi
+    [[ "$rel" == "$prefix" || "$rel" == "$prefix"/* ]] && return 0
+  done
+  return 1
 }
 
 # Archive members are "<basename of --wp-root>/<path inside that directory>".
@@ -922,6 +1053,10 @@ backup_site() {
     for d in "${HOT_REL_DIRS[@]+"${HOT_REL_DIRS[@]}"}" "${COLD_REL_DIRS[@]+"${COLD_REL_DIRS[@]}"}"; do
       [[ -n "$d" ]] && echo "${base}/${prefix}wp-content/uploads/${d}"
     done
+    local ex
+    for ex in "${EXCLUDE_RELS[@]+"${EXCLUDE_RELS[@]}"}" "${COLD_RELS[@]+"${COLD_RELS[@]}"}"; do
+      echo "${base}/$(escape_glob "$ex")"
+    done
     if [[ -n "$EXCLUDE_FROM" ]]; then
       [[ -f "$EXCLUDE_FROM" ]] || die "$E_ARGS" "exclude-from not found: $EXCLUDE_FROM"
       while IFS= read -r line || [[ -n "$line" ]]; do
@@ -944,37 +1079,142 @@ backup_site() {
   log "Created site.tar.gz ($(du -h "$out" | awk '{print $1}'))"
 }
 
+# Print NUL archive member names for month dirs and, when want_extra=1, --cold-path trees.
+# Month files are not repeated from a cold-path. --exclude wins over a cold-path.
+stream_upload_members() {
+  local base="$1"
+  local rel_uploads="$2"
+  local want_extra="$3"
+  shift 3
+  local -a month_dirs=("$@")
+  local rel cold_rel src
+  if [[ ${#month_dirs[@]} -gt 0 && -d "$WP_HOME/wp-content/uploads" ]]; then
+    (cd "$WP_HOME/wp-content/uploads" && find "${month_dirs[@]}" -type f -printf '%p\0') \
+      | while IFS= read -r -d '' rel || [[ -n "$rel" ]]; do
+          [[ -z "$rel" ]] && continue
+          path_is_excluded "$rel_uploads/$rel" && continue
+          printf '%s\0' "$base/$rel_uploads/$rel"
+        done
+  fi
+  [[ "$want_extra" == "1" ]] || return 0
+  local -a prune=()
+  local month prefix ex
+  local uploads_rel
+  uploads_rel="$rel_uploads"
+  [[ "$uploads_rel" == "." ]] && uploads_rel=""
+  for month in "${HOT_REL_DIRS[@]+"${HOT_REL_DIRS[@]}"}" "${COLD_REL_DIRS[@]+"${COLD_REL_DIRS[@]}"}"; do
+    [[ -n "$month" ]] || continue
+    if [[ -n "$uploads_rel" ]]; then
+      prefix="$uploads_rel/$month"
+    else
+      prefix="$month"
+    fi
+    [[ ${#prune[@]} -gt 0 ]] && prune+=(-o)
+    prune+=(-path "$(escape_glob "$prefix")")
+  done
+  for ex in "${EXCLUDE_RELS[@]+"${EXCLUDE_RELS[@]}"}"; do
+    [[ ${#prune[@]} -gt 0 ]] && prune+=(-o)
+    prune+=(-path "$(escape_glob "$ex")")
+  done
+  for cold_rel in "${COLD_RELS[@]+"${COLD_RELS[@]}"}"; do
+    src="$WP_ROOT/$cold_rel"
+    if [[ ! -e "$src" ]]; then
+      continue
+    fi
+    if [[ -f "$src" && ! -L "$src" ]]; then
+      path_is_excluded "$cold_rel" && continue
+      path_under_classified_month "$cold_rel" && continue
+      printf '%s\0' "$base/$cold_rel"
+      continue
+    fi
+    [[ -d "$src" ]] || continue
+    if [[ ${#prune[@]} -gt 0 ]]; then
+      (cd "$WP_ROOT" && find "$cold_rel" \( "${prune[@]}" \) -prune -o -type f -printf '%p\0')
+    else
+      (cd "$WP_ROOT" && find "$cold_rel" -type f -printf '%p\0')
+    fi | while IFS= read -r -d '' rel || [[ -n "$rel" ]]; do
+      [[ -z "$rel" ]] && continue
+      path_is_excluded "$rel" && continue
+      path_under_classified_month "$rel" && continue
+      printf '%s\0' "$base/$rel"
+    done
+  done
+}
+
+cold_extra_has_file() {
+  local cold_rel src rel
+  for cold_rel in "${COLD_RELS[@]+"${COLD_RELS[@]}"}"; do
+    src="$WP_ROOT/$cold_rel"
+    [[ -e "$src" ]] || continue
+    if [[ -f "$src" && ! -L "$src" ]]; then
+      path_is_excluded "$cold_rel" && continue
+      path_under_classified_month "$cold_rel" && continue
+      return 0
+    fi
+    [[ -d "$src" ]] || continue
+    while IFS= read -r -d '' rel || [[ -n "$rel" ]]; do
+      [[ -z "$rel" ]] && continue
+      path_is_excluded "$rel" && continue
+      path_under_classified_month "$rel" && continue
+      return 0
+    done < <(cd "$WP_ROOT" && find "$cold_rel" -type f -printf '%p\0' 2>/dev/null || true)
+  done
+  return 1
+}
+
 archive_month_trees() {
   local label="$1"
   local out_name="$2"
   shift 2
   local -a dirs=("$@")
+  local -a extras=()
+  local want_extra=0
+  if [[ "$label" == "cold" ]]; then
+    extras=("${COLD_RELS[@]+"${COLD_RELS[@]}"}")
+    [[ ${#extras[@]} -gt 0 ]] && want_extra=1
+  fi
 
   step "backup uploads-$label"
   local uploads="$WP_HOME/wp-content/uploads"
   local out="$RUN_PATH/$out_name"
 
   if [[ ! -d "$uploads" ]]; then
-    log "uploads dir missing; skip uploads-$label"
-    return 0
+    if [[ "$want_extra" -eq 0 ]]; then
+      log "uploads dir missing; skip uploads-$label"
+      return 0
+    fi
+    log "uploads dir missing; archiving cold-path files only"
+    dirs=()
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "DRY-RUN: uploads-$label -> $out_name dirs: ${dirs[*]:-(none)}"
+    log "DRY-RUN: uploads-$label -> $out_name dirs: ${dirs[*]:-(none)} cold-paths: ${extras[*]:-(none)}"
     return 0
   fi
 
-  if [[ ${#dirs[@]} -eq 0 ]]; then
+  local cold_rel
+  for cold_rel in "${extras[@]+"${extras[@]}"}"; do
+    if [[ ! -e "$WP_ROOT/$cold_rel" ]]; then
+      log "cold-path not found, excluded from site only: $cold_rel"
+    fi
+  done
+
+  if [[ ${#dirs[@]} -eq 0 && "$want_extra" -eq 0 ]]; then
     log "No month directories for uploads-$label; writing empty archive"
     make_empty_tar "$out"
     ARTIFACTS+=("$out_name")
     return 0
   fi
 
-  local has=""
-  has="$(cd "$uploads" && find "${dirs[@]}" -type f -print -quit 2>/dev/null || true)"
-  if [[ -z "$has" ]]; then
-    log "No files in uploads-$label month dirs; writing empty archive"
+  local has_month="" has_extra=0
+  if [[ ${#dirs[@]} -gt 0 ]]; then
+    has_month="$(cd "$uploads" && find "${dirs[@]}" -type f -print -quit 2>/dev/null || true)"
+  fi
+  if [[ "$want_extra" -eq 1 ]] && cold_extra_has_file; then
+    has_extra=1
+  fi
+  if [[ -z "$has_month" && "$has_extra" -eq 0 ]]; then
+    log "No files in uploads-$label; writing empty archive"
     make_empty_tar "$out"
     ARTIFACTS+=("$out_name")
     return 0
@@ -990,17 +1230,14 @@ archive_month_trees() {
   parent="$(wp_root_parent)"
   base="$(wp_root_base)"
   rel_uploads="$(rel_to_root "$uploads")"
-  log "Archiving uploads-$label (${#dirs[@]} month dirs) -> $out_name"
-  LAST_CMD="find ${dirs[*]} -type f | tar -C $parent -czf $out_name"
+  log "Archiving uploads-$label (${#dirs[@]} month dirs, ${#extras[@]} cold-paths) -> $out_name"
+  LAST_CMD="find month dirs and cold-paths | tar -C $parent -czf $out_name"
   local rc=0
   set +e
-  (cd "$uploads" && find "${dirs[@]}" -type f -printf '%p\0') \
-    | while IFS= read -r -d '' rel || [[ -n "$rel" ]]; do
-        printf '%s\0' "$base/$rel_uploads/$rel"
-      done \
+  stream_upload_members "$base" "$rel_uploads" "$want_extra" "${dirs[@]}" \
     | "${runner[@]}" tar -C "$parent" --null --verbatim-files-from --numeric-owner -czf "$out" --files-from=- \
       2>"$RUN_PATH/uploads-${label}-tar.err"
-  rc=${PIPESTATUS[2]}
+  rc=${PIPESTATUS[1]}
   set -e
   finish_tar "$rc" "$out" "$RUN_PATH/uploads-${label}-tar.err" "$E_UPLOADS" "uploads-$label"
   ARTIFACTS+=("$out_name")
@@ -1058,6 +1295,10 @@ backup_uploads_changed() {
       prune+=(-o -path "./$(rel_to_root "$BACKUP_ROOT")")
       ;;
   esac
+  local ex
+  for ex in "${EXCLUDE_RELS[@]+"${EXCLUDE_RELS[@]}"}"; do
+    prune+=(-o -path "./$(escape_glob "$ex")")
+  done
 
   local parent base
   parent="$(wp_root_parent)"
@@ -1123,6 +1364,7 @@ write_manifest() {
   "db_name": "$(json_escape "$DB_NAME")",
   "hot_months": $HOT_MONTHS,
   "hot_months_resolved": $(json_string_array "${HOT_REL_DIRS[@]+"${HOT_REL_DIRS[@]}"}"),
+  "cold_paths": $(json_string_array "${COLD_RELS[@]+"${COLD_RELS[@]}"}"),
   "changed_hours": $CHANGED_HOURS,
   "changed_days": ${CHANGED_DAYS:-null},
   "notes": "$(json_escape "$NOTES")",
@@ -1471,6 +1713,12 @@ main() {
   prepare_run_dir
 
   log "Starting backup mode=$MODE destination=$DESTINATION site_id=$SITE_ID"
+  if [[ ${#EXCLUDE_RELS[@]} -gt 0 ]]; then
+    log "Excluding from archives: ${EXCLUDE_RELS[*]}"
+  fi
+  if [[ ${#COLD_RELS[@]} -gt 0 ]]; then
+    log "Cold paths: ${COLD_RELS[*]}"
+  fi
   log_debug "wp_root=$WP_ROOT wp_home=$WP_HOME config=$WP_CONFIG_PATH"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
